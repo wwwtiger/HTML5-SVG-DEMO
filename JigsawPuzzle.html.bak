@@ -1,0 +1,786 @@
+<!DOCTYPE HTML>
+<html>
+<style type="text/css">
+	* {-moz-user-select:   none; }
+	body
+	{
+		-moz-user-select:   none; 
+		cursor:url(res/3dgarro.cur),auto;  
+		border-style: none;   
+	}
+	.bk
+	{ 
+		background-image: url(res/woodBoard.jpg);
+		background-repeat: repeat;
+		border-style: none;
+	}
+	.block
+	{ 
+		cursor:url(res/3dgnwse.cur),auto;
+	}
+	
+</style>
+
+<script src="Hammer/hammer.js"></script>
+<script src="js/regEx.js"></script>
+<script src="js/newBlock.js"></script>
+<script src="js/blockFuncs.js"></script>
+<script src="js/successEffect.js"></script>
+<script type="text/javascript">
+/*
+wwwtiger 
+EMail: wang_zhaoyan2000@163.com
+BLOG: http://blog.csdn.net/firefight/
+
+Beijing
+P.R.China
+
+Test on: CHROME17 FF12 IE9 SAFARI5
+
+Usage: 	Grab and drag image by mouse left button. 
+	Double-click mouse left button to rotate the image.
+
+首先生成BLOCK对象，每个BLOCK包含一个SVG PATH
+生成REGION对象，每个REGION包含一个BLOCK列表，初始只有一个BLOCK
+使用HAMMER实现在SVG PATH上的DRAGDROP，所有的拖动和旋转根据REGION进行
+在DROP时判断REGION是否能够合并，如果合并，则将其中一个REGION的全部BLOCK移动到另外一个REGION中
+在图像更新时，对每一个BLOCK包含的SVG PATH，使用正则表达式解析PATH字符串，并利用CANVAS CLIP显示图像
+
+2012-5-7 	创建
+2012-5-14	解决IE9旋转问题，修改双击位置，首先判断是否存在offsetXY，如果不存在，再使用layerXY
+		将整个图像拉伸到固定大小显示（目前是400×400）
+		增加浏览器类型和版本判断函数，并将缺省声音类型设为mp3，并对声音加载增加错误处理
+		
+ISSUE:
+	在所有移动设备上都没有成功显示
+*/
+
+var Sys = {};
+var background, canvas, ctx, boardCtx, img;    
+var svgRoot, pathGroup=null;
+var lastX = 0, lastY = 0;
+var mergeSound, splatSound, winSound;
+
+//根据SVG PATH字符串初始化画布
+function initCanvas()
+{
+	// Create an image element
+	img = new Image();     
+	
+	// When the image is loaded, draw it
+	img.onload = function () 
+	{
+	    startGame();
+	}
+	
+	// Specify the src to load the image
+	img.src = "res/jigsawPuzzle.jpg";	
+}
+
+function randomSpread()
+{
+	for(var i=regions.length-1; i>=0; i--)
+	{
+		var region = regions[i];
+		
+		//Random rotate and spread images
+		var cx = Math.random() * innerWidth / 4; 
+		var cy = Math.random() * innerHeight / 4; 
+		var rotateFlag = parseInt( Math.random() * 10 ) % 4;
+		var rx = region.blocks[0].col * colUnit + colUnit / 2;
+		var ry = region.blocks[0].row * rowUnit + rowUnit / 2;
+		
+		transformRegion(region, cx, cy, rotateFlag, rx, ry);
+	}
+}			
+			
+function getRegionIndex(currRegion)
+{
+	var index = -1;
+	for(var i=regions.length-1; i>=0; i--)
+	{
+		if(regions[i] === currRegion)
+			return i;
+	}
+	
+	return index;
+}
+			
+//根据REGION显示所有图片
+function updateAllBlocks()
+{
+	ctx.clearRect(0, 0, canvas.width, canvas.height);   
+		
+	for(var i=0; i<regions.length; i++) //与顺序相关，不能改倒序
+	{
+		var region = regions[i];
+		
+		for(var j=region.blocks.length-1; j>=0; j--)
+		{
+			var block = region.blocks[j];
+			
+			if(i==(regions.length-1))//显示当前REGION边框
+				drawCanvasByPathStr(block.pathObj, 1); 
+			else   
+				drawCanvasByPathStr(block.pathObj, 0);
+			pathGroup.removeChild(block.pathObj);
+			pathGroup.appendChild(block.pathObj);
+		}
+	}  
+}
+
+//使用SVG PATH字符串和CANVAS CLIP显示图像
+function drawCanvasByPathStr(pathObj, highlight)
+{
+	var pathStr = pathObj.getAttributeNS(null, "d");
+	var matrix = pathObj.getCTM();
+
+	var newStr = pathStr.replace(reg, ' ');	
+	var pathCmd = execReg(mainReg, newStr);  
+	
+	ctx.save();  
+	
+	if(matrix != null)                 
+        	ctx.setTransform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+    
+	// Create a shape, of some sort
+	ctx.beginPath();
+	
+	//Begin path by path str
+	for(var i=0; i<pathCmd.length; i++) //与顺序相关，不能改倒序
+	{
+		var op = execReg(numReg, pathCmd[i]);
+	
+		if((pathCmd[i][0] == 'M')&& (op.length == 2))
+		{     
+			ctx.moveTo(op[0], op[1]);  
+		}
+		else if( (pathCmd[i][0] == 'L')&& (op.length == 2))
+		{
+			ctx.lineTo(op[0], op[1]);  
+		}
+		else if((pathCmd[i][0] == 'Q') && (op.length == 4))
+		{
+			ctx.quadraticCurveTo(op[0], op[1], op[2], op[3]);  
+		}
+		else if((pathCmd[i][0] == 'C') && (op.length == 6))
+		{
+			ctx.bezierCurveTo(op[0], op[1], op[2], op[3], op[4], op[5]);  
+		}
+		else if(pathCmd[i][0] == 'Z')
+		{
+			ctx.closePath();  
+			break;
+		}
+	}
+	    
+	// Clip to the current path
+	ctx.clip();
+	//ctx.drawImage(img, 0, 0);
+	ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, imageWidth, imageHeight);
+	
+	//ctx.globalCompositeOperation = "xor";
+	ctx.lineWidth = 2;
+	ctx.strokeStyle = "white";
+	if(highlight)
+	{
+		ctx.lineWidth = 4;
+		ctx.strokeStyle = "black";
+	}
+	ctx.stroke();
+	
+	// Undo the clipping
+	ctx.restore();
+}
+
+function matrixToStr(matrix)
+{
+	var transformStr = "matrix(" + matrix.a + "," + matrix.b + "," + matrix.c + "," 
+				+ matrix.d + "," + matrix.e + "," + matrix.f + ")";
+	return transformStr;
+}
+
+function updateStatusText(id, str)
+{
+	//var status = document.getElementById(id);   
+	//status.firstChild.data = str;
+}
+
+//通过SVG路径对象得到BLOCK
+function getBlockByPath(pathObj)
+{
+	if(pathObj == null)
+		return null;
+		
+	for(var i=blocks.length-1; i>=0; i--)
+	{
+		var block = blocks[i];
+		if(block.pathObj === pathObj)
+			return block;
+	}
+	return null;
+}
+
+//通过BLOCK得到REGION
+function getRegionByBlock(block)
+{
+	if(block == null)
+		return null;
+		
+	for(var i=regions.length-1; i>=0; i--)
+	{
+		var region = regions[i];
+		if(region.hasBlock(block))
+			return region;
+	}
+	return null;
+}
+
+function highlightRegion(currRegion)
+{
+	if(currRegion == null)
+		return;
+	
+	if(currRegion!=null) //将当前选中的区域从列表中删除，然后添加到列表最后，保证了当前选中区域中最前面的显示，而且其它REGION的显示顺序不变。
+	{
+		var index = getRegionIndex(currRegion);
+		if(index!=-1)
+		{
+			regions.splice(index,1);
+			regions.push(currRegion);
+		}
+	}
+	
+	updateAllBlocks();
+	return null;
+}
+
+function addHammer()
+{
+	var hammer = new Hammer(svgRoot);
+	hammer.prevent_default = true;
+	hammer.drag_min_distance = 20;
+	//hammer.css_hacks = false;
+	
+	//接收触摸屏事件，包括拖动，点击，保持和变换
+	//Now, on every gesture that is performed on the container element, you'll receive a callback object with information on the gesture.
+	hammer.ondragstart = function(ev) 
+	{	
+		lastX = 0;
+		lastY = 0;
+		updateStatusText("moveStatus", "drag start");
+		
+		if(currPath != null)
+		{
+			currPath.setAttributeNS(null, "pointer-events", "none");
+			currPath.setAttributeNS(null, "onmouseover", null);
+			currPath.setAttributeNS(null, "onmouseout", null);
+		}
+	};      
+	hammer.ondrag = function(ev) 
+	{	
+		var offsetX = ev.distanceX - lastX;
+		var offsetY = ev.distanceY - lastY;
+		lastX = ev.distanceX;
+		lastY = ev.distanceY;
+		
+		//根据鼠标拖动移动SVG PATH
+		var block = getBlockByPath(currPath);
+		var region = getRegionByBlock(block);
+		translateRegion(region, offsetX, offsetY);
+		highlightRegion(region);
+	};
+	
+	hammer.ondragend = function(ev) 
+	{	
+		lastX = 0;
+		lastY = 0;
+		updateStatusText("moveStatus", "drag end " + ev.distance + "," + ev.direction); 
+		
+		if(currPath == null)
+			return;
+		currPath.setAttributeNS(null, "pointer-events", "all");
+			
+		var block = getBlockByPath(currPath);
+		
+		var region = getRegionByBlock(block);
+				
+		if(checkMerge(region))
+		{
+			highlightRegion(region);
+			//if(mergeSound!=null)
+			//	mergeSound.play();
+			playSound(mergeSound, 0, 0.8);
+			if(region.blocks.length == imageRow * imageCol)
+			{
+				//alert('You win!!!');
+				if(pathGroup != null)
+				{
+					svgRoot.removeChild(pathGroup);
+					pathGroup = null;
+				}
+				playSound(winSound, 0, 0.8);
+				createFog();
+			}
+		}
+		else
+			playSound(splatSound, 0, 0.8);
+			
+		//ondragend还需要取消拖动路径，防止鼠标在画布外mouseup的情况
+		currPath = null;
+		
+	};
+	
+	hammer.ontap = function(ev) 
+	{ 	
+		if(currPath == null)
+			return;
+		currPath.setAttributeNS(null, "pointer-events", "all");	
+		
+		var targetElement = ev.originalEvent.target;
+		var eid = targetElement.getAttribute("id");
+		//alert(eid.substr(0, 4));
+		
+		if ( eid.substr(0, 4) == PATH_ID )
+		{
+			var block = getBlockByPath(targetElement);
+			var region = getRegionByBlock(block);
+			highlightRegion(region);
+		}
+	};
+	
+	hammer.ondoubletap = function(ev) 
+	{ 	
+		//根据鼠标点击旋转SVG PATH
+		var targetElement = ev.originalEvent.target;
+		var eid = targetElement.getAttribute("id");
+		
+		//alert(eid.substr(0, 4));
+		
+		if(currPath == null)
+			return;
+		currPath.setAttributeNS(null, "pointer-events", "all");		
+		
+		if ( eid.substr(0, 4) == PATH_ID )
+		{
+			var cx, cy;
+			/*
+			if( Sys.ie == null) //For FireFox/Chrome/Safari
+			{
+				cx = ev.originalEvent.layerX;
+				cy = ev.originalEvent.layerY;
+			}	
+			else //For IE9
+			{
+				cx = ev.originalEvent.pageX - canvas.offsetLeft;
+				cy = ev.originalEvent.pageY - canvas.offsetTop;
+			}
+			*/
+			
+			var offsets = findPos(canvas);
+			cx = ev.originalEvent.pageX - offsets.left;
+			cy = ev.originalEvent.pageY - offsets.top;
+			
+			
+				
+			//var block = getBlockByPath(targetElement);
+			var block = getBlockByPath(currPath);
+			var region = getRegionByBlock(block);
+			
+			transformRegion(region, 0, 0, 1, cx, cy);
+			highlightRegion(region);
+		}
+		//alert(ev.originalEvent.layerX + ',' + ev.originalEvent.layerY);
+	};
+	
+	hammer.onhold = function(ev) { };
+	hammer.ontransformstart = function(ev) { };
+	hammer.ontransform = function(ev) { };
+	hammer.ontransformend = function(ev) { };
+}
+
+//REGION简单平移
+function translateRegion(region, cx, cy)
+{
+	if(region == null)
+		return;
+	
+	for(var i=region.blocks.length-1; i>=0; i--)
+	{
+		var block = region.blocks[i];
+		
+		//Update tranform matrix
+		var transMatrix = block.pathObj.getCTM();
+		var newMatrix = transMatrix; 
+		
+		newMatrix.e = transMatrix.e + cx ;
+		newMatrix.f = transMatrix.f + cy ;
+		
+		var transformStr = matrixToStr(newMatrix);
+		
+		block.pathObj.setAttributeNS(null, "transform", transformStr);
+	}
+}
+
+
+//REGION平移，旋转的变换处理
+function transformRegion(region, cx, cy, rotateFlag, rx, ry)
+{
+	if(region == null)
+		return;
+	
+	region.rotateFlag = (region.rotateFlag + rotateFlag) % 4; 
+	for(var i=region.blocks.length-1; i>=0; i--)
+	{
+		var block = region.blocks[i];
+		
+		var sin = 1, cos = 0;
+		if(rotateFlag == 1) //90
+		{
+			sin = 1;
+			cos = 0;
+		}
+		else if(rotateFlag == 2) //180
+		{
+			sin = 0;
+			cos = -1;
+		}
+		else if(rotateFlag == 3) //270
+		{
+			sin = -1;
+			cos = 0;
+		}
+		else //default 0
+		{
+			sin = 0;
+			cos = 1;
+		}
+		
+		//Update tranform matrix
+		var transMatrix = block.pathObj.getCTM();
+		
+		var newMatrix = svgRoot.createSVGMatrix();
+		newMatrix.a = transMatrix.a * cos - transMatrix.b * sin;
+		newMatrix.b = transMatrix.a * sin + transMatrix.b * cos;
+		newMatrix.c = transMatrix.c * cos - transMatrix.d * sin;
+		newMatrix.d = transMatrix.c * sin + transMatrix.d * cos;
+		newMatrix.e = transMatrix.e * cos - transMatrix.f * sin - rx * cos + ry * sin + rx + cx ;
+		newMatrix.f = transMatrix.e * sin + transMatrix.f * cos - rx * sin - ry * cos + ry + cy ;
+		
+		var transformStr = matrixToStr(newMatrix);
+			
+		block.pathObj.setAttributeNS(null, "transform", transformStr);
+	}
+}
+
+//检查是否合并
+function checkMerge(region)
+{
+	if(region == null)
+		return;
+	
+	var mergeFlag = false;
+		
+	for(var i=regions.length-1; i>=0; i--)
+	{
+		var newRegion = regions[i];
+		if(newRegion === region)
+			continue;
+		
+		if(region.rotateFlag != newRegion.rotateFlag)
+		{
+			//alert('not same angle');
+			continue;
+		}
+		
+		if(region.isNeighbour(newRegion))
+		{
+			//alert('neighbour!');
+			var transMatrix1 = region.blocks[0].pathObj.getCTM();
+			var transMatrix2 = newRegion.blocks[0].pathObj.getCTM();
+			var cx = transMatrix1.e - transMatrix2.e;
+			var cy = transMatrix1.f - transMatrix2.f;
+			
+			//alert(cx + "," + cy);
+			if( (cx*cx + cy*cy) < (MIN_MERGE_DISTANCE * MIN_MERGE_DISTANCE) ) 
+			{
+				//alert('merge');
+				region.mergeRegion(newRegion);
+				mergeFlag = true;
+			}
+		}
+	}
+	
+	return mergeFlag;
+}
+
+//将SVG PATH加入文档
+function createPathByRegionList()
+{
+	if(pathGroup != null)
+		svgRoot.removeChild(pathGroup);
+	
+	pathGroup = document.createElementNS(svgNS, 'g');   
+    	pathGroup.setAttribute('id', 'pathGroup');   
+    	svgRoot.appendChild(pathGroup); 
+    	
+	for(var i = regions.length -1; i>=0; i--)
+	{
+		var region = regions[i];
+		if(region == null)
+			continue;
+		
+		for(var j=region.blocks.length-1; j>=0; j--)
+		{
+			var block = region.blocks[j];
+			pathGroup.appendChild(block.pathObj);
+		}
+	}
+}
+
+function restartGame()
+{
+	if(confirm("Do you want restart game?"))
+	{
+		clearFog();
+		startGame();
+	}
+}
+
+function setLevel()
+{
+	if(document.getElementById("easyLevel").checked)
+	{
+		imageRow = 3;
+		imageCol = 3;
+	}
+	else if(document.getElementById("middleLevel").checked)
+	{
+		imageRow = 4;
+		imageCol = 4;
+	}
+	else if(document.getElementById("advanceLevel").checked)
+	{
+		imageRow = 5;
+		imageCol = 5;
+	}
+}
+
+function startGame()
+{
+	blocks=[];
+	regions=[];
+	
+	//Set game level
+	setLevel();
+	
+	//Create path objects
+	roundSize();
+	createBlockList();
+	createRegionList();
+	
+	createPathByRegionList();
+	randomSpread();
+	updateAllBlocks();
+}
+
+var boardFonts = ["normal lighter 25px cursive","normal lighter 20px cursive","normal lighter 10px cursive"];
+function showBoard(text, fontIndex, color, cx, cy)
+{
+	boardCtx.font = boardFonts[fontIndex];
+	boardCtx.fillStyle = color;
+	boardCtx.fillText(text, cx, cy);
+}
+
+function loadSound()
+{       
+	var soundType = "mp3"; //For IE, Chrome and Safari      
+	if( (Sys.firefox) || (Sys.opera) )
+		soundType = "ogg";
+	
+	//Create and load sounds 
+	try
+	{
+		mergeSound = new Audio("res/sounds/points." + soundType);
+		splatSound = new Audio("res/sounds/splat." + soundType);
+		winSound = new Audio("res/sounds/winmusic." + soundType);
+	}
+	catch(err)
+	{
+		var txt="There was an error on this page.\n\n";
+		txt+="Load sound failed. Error description: " + err.description + "\n\n";
+		txt+="If your browser is SAFARI, please install QUICKTIME.\n\n";
+		txt+="Click OK to continue.\n\n";
+		alert(txt);
+	}
+}
+
+var SYS_MUTE = 0;
+
+function playSound(sound, loop, volume)
+{
+	if(SYS_MUTE)
+		return;
+		
+	try{
+		sound.loop = loop;
+		sound.volume = volume;
+		
+		try{
+			sound.currentTime = 0;
+		}catch(err){}
+		
+		sound.play();
+	}
+	catch(err){}
+}
+
+function createFog()
+{
+	//Hide puzzle
+	ctx.clearRect(0, 0, canvas.width, canvas.height);
+	
+	//Show success animate
+	var cx = 100;
+	var cy = 100;
+	var w = 600;
+	var h = 400;
+	
+	showBoard("Protect wild animal is protect ourself.", 0, '#ff8800', 50, 550);
+	showTipsOnBoard();
+	boardCtx.drawImage(img, 0, 0, img.width, img.height, cx, cy,  w, h);
+
+	ps = new ParticleSystem();
+	ps.init(boardCtx, 20, 0, 0, 600, 60, cx, cy, w, h);
+	animate=setInterval(function(){
+					ps.update(); 
+					ps.render();
+					},  10);
+}
+
+function clearFog()
+{
+	if(animate!=null)
+	{
+		clearInterval(animate);
+		ps = null;
+	}
+	
+	boardCtx.clearRect(0, 0, canvas.width, canvas.height);
+	showTipsOnBoard();
+}
+
+function showTipsOnBoard()
+{
+	showBoard("Jigsaw Puzzle: a HTML5 demo for SVG&CANVAS", 0, '#ff8800', 10, 30);
+	showBoard("Drag to move; Double-click to rotate", 1, '#A88800', 10, 60);
+	showBoard("Arthur: wang_zhaoyan2000@163.com", 2, '#A88800', 10, 80);
+}
+
+function checkBrowserType()
+{
+        var ua = navigator.userAgent.toLowerCase();
+        var s;
+        (s = ua.match(/msie ([\d.]+)/)) ? Sys.ie = s[1] :
+        (s = ua.match(/firefox\/([\d.]+)/)) ? Sys.firefox = s[1] :
+        (s = ua.match(/chrome\/([\d.]+)/)) ? Sys.chrome = s[1] :
+        (s = ua.match(/opera.([\d.]+)/)) ? Sys.opera = s[1] :
+        (s = ua.match(/version\/([\d.]+).*safari/)) ? Sys.safari = s[1] : 0;
+
+        //以下进行测试
+        //if (Sys.ie) alert('IE: ' + Sys.ie);
+        //if (Sys.firefox) alert('Firefox: ' + Sys.firefox);
+        //if (Sys.chrome) alert('Chrome: ' + Sys.chrome);
+        //if (Sys.opera) alert('Opera: ' + Sys.opera);
+        //if (Sys.safari) alert('Safari: ' + Sys.safari);
+}
+
+function findPos(obj) {
+	var curleft = curtop = 0;
+	if (obj.offsetParent) {
+		do {
+			curleft += obj.offsetLeft;
+			curtop += obj.offsetTop;
+		} while (obj = obj.offsetParent);
+	}
+	return {left:curleft,top:curtop};
+}
+      
+window.onload = function() 
+{
+	checkBrowserType();
+	
+	// Grab the Canvas and Drawing Context
+	canvas = document.getElementById('container');
+	ctx = canvas.getContext('2d');
+	boardCtx = document.getElementById('board').getContext('2d');
+	
+	//ctx.globalCompositeOperation = "xor";
+	//ctx.shadowOffsetX = 5;
+	//ctx.shadowOffsetY = 5;
+	//ctx.shadowBlur = 5;
+	
+	background = document.getElementById('background');
+	svgRoot = document.getElementById('svgRoot');
+	pathGroup = document.getElementById('pathGroup');	
+	document.ondragstart=function (){return false;}; //消除FireFox中的缺省图片拖动
+	
+	//<rect id="background" x="0" y="0" width="800" height="600" fill="white" pointer-events="all" />
+	var svgBk = document.createElementNS(svgNS, 'rect');   
+    	svgBk.setAttribute('id', 'svgBackground');   
+    	svgBk.setAttribute('x', '0');   
+    	svgBk.setAttribute('y', '0');   
+    	svgBk.setAttribute('width', '800');   
+    	svgBk.setAttribute('height', '600');   
+    	svgBk.setAttribute('fill', 'none');   
+    	svgBk.setAttribute('fill-opacity', '0');   
+    	svgBk.setAttribute('pointer-events', 'all');   
+    	//svgBk.setAttribute('id', 'svgBackground');   
+    	svgRoot.appendChild(svgBk); 
+	
+	//初始化
+	loadSound();
+	initCanvas();
+	
+	//增加拖动功能
+	addHammer();
+	
+	//显示提示
+	showTipsOnBoard();
+	
+	//var offsets = findPos(canvas);
+	//alert(offsets.left + ", " + offsets.top);
+}
+
+
+
+</script>
+
+<body oncontextmenu="return false" onselectstart="return false" oncopy="return false">
+   <canvas id="container" class="bk" width="800" height="600" style="position:absolute">Your browser not support HTML5, please upgrade.</canvas>  
+   <canvas id="board" width="800" height="600" style="position:absolute">Your browser not support HTML5, please upgrade.</canvas>  
+   <svg id="svgRoot" class="svgroot" width="800" height="600" style="position:absolute" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"></svg>
+   <div style="position:absolute;left:200px;top:620px;-moz-user-select:none;-webkit-user-select:none;">
+   <label>Level setting:</label>            
+          <input type = "radio"
+                 name = "radSize"
+                 id = "easyLevel"
+                 value = "easy"
+                 checked = "checked" />
+          <label for = "easyLevel">Easy(3*3)</label>
+          
+          <input type = "radio"
+                 name = "radSize"
+                 id = "middleLevel"
+                 value = "middle" />
+          <label for = "middleLevel">Middle(4*4)</label>
+ 
+          <input type = "radio"
+                 name = "radSize"
+                 id = "advanceLevel"
+                 value = "advance" />
+          <label for = "advanceLevel">Advance(5*5)</label>
+   </div>
+   <img id="BtnImgStart" onmousedown="restartGame()" style="position:absolute;left:700px;top:620px;cursor:pointer;-moz-user-select:none;-webkit-user-select:none;" src="./res/START-Button.png"></img> 
+ </body>   
+</html>  
